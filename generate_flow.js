@@ -1,58 +1,79 @@
-const axios = require('axios');
+const axios = require("axios");
+require("dotenv").config();
 
 module.exports = async (req, res) => {
   const { goal, context, equipment } = req.body;
 
-  const prompt = `
+  try {
+    // 🔁 On récupère dynamiquement les TDs à partir des URLs
+    const enrichedEquipment = await Promise.all(
+      equipment.map(async (e) => {
+        const tdResponse = await axios.get(e.td);
+        const td = tdResponse.data;
+
+        return {
+          name: e.name,
+          tdRaw: JSON.stringify(td),
+          actions: Object.keys(td.actions || {}),
+          properties: Object.keys(td.properties || {}),
+          events: Object.keys(td.events || {}),
+        };
+      })
+    );
+
+    // 🧠 Prompt généré dynamiquement
+    const prompt = `
 Tu es un assistant intelligent qui génère des flows Node-RED à partir de descriptions d'équipements Web of Things (WoT) et d’un objectif.
 
 But : ${goal}
 Contexte : ${context}
 
 Équipements :
-${equipment.map(e => `
+${enrichedEquipment
+  .map(
+    (e, i) => `
 - ${e.name}
-  - TD : ${e.td}
-  - Actions : ${e.actions.join(', ')}
-  - Propriétés : ${e.properties.join(', ')}
-  - Événements : ${e.events.join(', ')}
-`).join('\n')}
+  - TD : ${equipment[i].td}
+  - Actions : ${e.actions.join(", ")}
+  - Propriétés : ${e.properties.join(", ")}
+  - Événements : ${e.events.join(", ")}
+`
+  )
+  .join("\n")}
 
 Consignes :
 - Utilise les nœuds de la contribution Node-RED WoT : \`consumed-thing\`, \`invoke-action\`, \`subscribe-event\`, \`read-property\`, \`write-property\`, \`observe-property\`, \`unsubcribe-event\`, \`response\`
-- Chaque équipement doit être représenté avec un nœud \`consumed-thing\` contenant la TD complète
+- Chaque équipement doit être représenté avec un nœud \`consumed-thing\` contenant la TD complète (en JSON)
 - Crée un enchaînement logique entre les nœuds en utilisant \`wires\`
-📦 Réponds uniquement par un tableau JSON valide représentant un flow Node-RED. 
-❌ N'inclus aucun texte, balise, commentaire, ni Markdown autour.
-✅ Ne renvoie que le tableau JSON prêt à importer dans Node-RED.
+- Réponds uniquement par un tableau JSON valide représentant un flow Node-RED. 
+- N'inclus aucun texte, balise, commentaire, ni Markdown autour.`;
 
-
-Ta sortie doit être un tableau JSON contenant tous les nœuds.
-`;
-
-
-
-  try {
+    
     const response = await axios.post(
-      'https://api.deepinfra.com/v1/openai/chat/completions',
+      `https://api-inference.huggingface.co/models/${process.env.HF_MODEL_ID}`,
       {
-        model: 'deepseek-ai/DeepSeek-R1',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.3
+        inputs: prompt,
+        parameters: {
+          max_new_tokens: 1024,
+          temperature: 0.3,
+        },
       },
       {
         headers: {
-          'Authorization': `Bearer ${process.env.DEEPINFRA_API_KEY}`,
-          'Content-Type': 'application/json'
-        }
+          Authorization: `Bearer ${process.env.HF_API_KEY}`,
+          "Content-Type": "application/json",
+        },
       }
     );
 
+    const text = response.data?.[0]?.generated_text || "";
+    const match = text.match(/\[\s*{[\s\S]*}\s*\]/);
+    if (!match) throw new Error("Aucun JSON détecté dans la réponse du LLM.");
 
-    const json = response.data.choices[0].message.content;
-    res.send(JSON.parse(json));
+    const jsonFlow = JSON.parse(match[0]);
+    res.send(jsonFlow);
   } catch (err) {
-    console.error(err.response?.data || err.message);
-    res.status(500).json({ error: 'Erreur DeepSeek : ' + err.message });
+    console.error("Erreur:", err.response?.data || err.message);
+    res.status(500).json({ error: "Erreur serveur : " + err.message });
   }
 };
